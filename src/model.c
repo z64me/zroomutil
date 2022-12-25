@@ -252,6 +252,20 @@ static int vbufGetVertexIndex(struct vertex *vbuf, int *vbufIndex, struct vertex
 	
 	return (*vbufIndex) - 1;
 }
+
+static void group_merge(struct group *dst, struct group *src)
+{
+	struct triangle *t;
+	
+	if (!dst || !src)
+		return;
+	
+	for (t = dst->tri; t && t->next; )
+		t = t->next;
+	
+	t->next = src->tri;
+	free(src);
+}
 #endif // private helpers
 
 // public functions
@@ -259,7 +273,19 @@ static int vbufGetVertexIndex(struct vertex *vbuf, int *vbufIndex, struct vertex
 /* merges all groups into one */
 void room_flatten(struct room *room)
 {
-	Log("TODO: room_flatten");
+	struct group *dst;
+	struct group *next = 0;
+	
+	if (!room || !(dst = room->group))
+		return;
+	
+	for (struct group *src = dst->next; src; src = next)
+	{
+		next = src->next;
+		group_merge(dst, src);
+	}
+	
+	dst->next = 0;
 }
 
 /* merges src into dst (src will be destroyed) */
