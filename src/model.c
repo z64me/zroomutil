@@ -20,6 +20,7 @@
 #define G_TRI2          0x06
 #define G_DL            0xde
 #define G_ENDDL         0xdf
+#define VBUF_MAX        32
 #endif
 
 // private globals
@@ -141,7 +142,7 @@ static void appendDL(struct room *dst, const uint8_t *src)
 	if (!src)
 		return;
 	
-	struct vertex vbuf[32] = {0};
+	struct vertex vbuf[VBUF_MAX] = {0};
 	struct material *mat = 0;
 	struct group *group = calloc(1, sizeof(*group));
 	const int stride = 8;
@@ -242,7 +243,7 @@ static int vbufGetVertexIndex(struct vertex *vbuf, int *vbufIndex, struct vertex
 			return i;
 	
 	/* too little space */
-	if (*vbufIndex >= 32)
+	if (*vbufIndex >= VBUF_MAX)
 		return -1;
 	
 	/* append */
@@ -409,7 +410,7 @@ void room_writeWavefront(struct room *room, const char *outfn)
 void room_writeZroom(struct room *room, const char *outfn, bool withMaterials)
 {
 	const uint8_t enddl[8] = { G_ENDDL };
-	struct vertex vbuf[32];
+	struct vertex vbuf[VBUF_MAX];
 	struct material *mat = 0;
 	FILE *fp;
 	int vbufIndex = 0;
