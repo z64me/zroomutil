@@ -193,7 +193,28 @@ void room_flatten(struct room *room)
 /* merges src into dst (src will be destroyed) */
 void room_merge(struct room *dst, struct room *src)
 {
-	Log("TODO: room_merge");
+	if (!dst || !src)
+		return;
+	
+	for (struct material *m = dst->mat; m; m = m->next)
+	{
+		if (!m->next)
+		{
+			m->next = src->mat;
+			break;
+		}
+	}
+	
+	for (struct group *g = dst->group; g; g = g->next)
+	{
+		if (!g->next)
+		{
+			g->next = src->group;
+			break;
+		}
+	}
+	
+	free(src);
 }
 
 /* loads a room */
