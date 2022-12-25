@@ -21,6 +21,7 @@ static void showargs(void)
 	Log(ARG "                      (when used multiple times, rooms are concatenated)");
 	Log(ARG "--flatten - merges all groups into one");
 	Log(ARG "--wavefront out.obj - exports the result to Wavefront model file");
+	Log(ARG "--zroom out.zroom - exports the result to zroom model file");
 	exit(EXIT_FAILURE);
 }
 
@@ -52,6 +53,11 @@ int main(int argc, char *argv[])
 		else if (!strcmp(a, "--wavefront"))
 		{
 			room_writeWavefront(room, next);
+			++i;
+		}
+		else if (!strcmp(a, "--zroom"))
+		{
+			room_writeZroom(room, next, true);
 			++i;
 		}
 		else if (!strcmp(a, "--flatten"))

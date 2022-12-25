@@ -15,8 +15,10 @@
 // gbi stuff
 #if 1
 #define G_VTX           0x01
+#define G_CULLDL        0x03
 #define G_TRI           0x05
 #define G_TRI2          0x06
+#define G_DL            0xde
 #define G_ENDDL         0xdf
 #endif
 
@@ -30,6 +32,7 @@ struct material
 	struct material *next;
 	void *data;
 	int dataLen;
+	uint32_t wroteAt;
 };
 
 struct vertex
@@ -45,6 +48,7 @@ struct triangle
 	struct triangle *next;
 	struct material *mat;
 	struct vertex v[3];
+	int8_t vbidx[3];
 };
 
 struct group
@@ -52,6 +56,7 @@ struct group
 	struct group *next;
 	struct material *mat;
 	struct triangle *tri;
+	uint32_t wroteAt;
 };
 
 struct room
@@ -179,6 +184,48 @@ static void appendDL(struct room *dst, const uint8_t *src)
 	
 	group->next = dst->group;
 	dst->group = group;
+}
+
+static void writeMaterials(struct room *room, FILE *dst)
+{
+	const int stride = 8;
+	const uint8_t enddl[8] = { G_ENDDL };
+	
+	/* write every material */
+	for (struct material *m = room->mat; m; m = m->next)
+	{
+		m->wroteAt = 0x03000000 | ftell(dst);
+		for (uint8_t *d = m->data; d < ((uint8_t*)m->data) + m->dataLen; d += stride)
+		{
+			if (*d != G_CULLDL
+				&& *d != G_DL
+			)
+				fwrite(d, 1, stride, dst);
+		}
+		fwrite(enddl, 1, sizeof(enddl), dst);
+	}
+}
+
+/* find index of v in vbuf; adds it if it doesn't already exist; returns -1 on failure */
+static int vbufGetVertexIndex(struct vertex *vbuf, int *vbufIndex, struct vertex v)
+{
+	if (!vbuf || !vbufIndex)
+		return -1;
+	
+	/* return match if one already exists */
+	for (int i = 0; i < *vbufIndex; ++i)
+		if (!memcmp(vbuf + i, &v, sizeof(v)))
+			return i;
+	
+	/* too little space */
+	if (*vbufIndex >= 32)
+		return -1;
+	
+	/* append */
+	vbuf[*vbufIndex] = v;
+	*vbufIndex += 1;
+	
+	return (*vbufIndex) - 1;
 }
 #endif // private helpers
 
@@ -328,6 +375,225 @@ void room_writeWavefront(struct room *room, const char *outfn)
 				);
 			fprintf(fp, "f %d %d %d\n", v, v + 1, v + 2);
 			v += 3;
+		}
+	}
+	
+	fclose(fp);
+}
+
+/* write a room to zroom format */
+void room_writeZroom(struct room *room, const char *outfn, bool withMaterials)
+{
+	const uint8_t enddl[8] = { G_ENDDL };
+	struct vertex vbuf[32];
+	struct material *mat = 0;
+	FILE *fp;
+	int vbufIndex = 0;
+	int opaNum = 0;
+	unsigned char roomHeader[] = {
+		0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x08, 0x00, 0x00, 0x00,	0x00, 0x00, 0x00, 0x00,
+		0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x10, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x0A, 0x00,
+		0x0A, 0x00, 0x00, 0x00,	0x03, 0x00, 0x00, 0x00,
+		0x05, 0x00, 0x00, 0x00, 0x0F, 0x28, 0x6D, 0xBE,
+		0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,	0x00, 0x00, 0x00, 0x00
+	};
+	
+	if (!room
+		|| !outfn
+		|| !(fp = fopen(outfn, "wb+"))
+	)
+		return;
+	
+	/* write placeholder room header */
+	fwrite(roomHeader, 1, sizeof(roomHeader), fp);
+	
+	/* write every material */
+	if (withMaterials)
+		writeMaterials(room, fp);
+	
+	/* write every group */
+	for (struct group *g = room->group; g; g = g->next, ++opaNum)
+	{
+		struct triangle *tBegin = g->tri;
+		FILE *dl;
+		size_t dlLen;
+		
+		if (!(dl = tmpfile()))
+			die("failed to create tmpfile");
+		
+		Log("processing group %p...", (void*)g);
+		
+		/* triangle data first */
+		for (struct triangle *t = tBegin; t; t = t->next)
+		{
+			int vbufIndexOld = vbufIndex;
+			bool didJump = false;
+			
+			if (withMaterials && t->mat != mat)
+			{
+				mat = t->mat;
+				
+				if (t != tBegin)
+				{
+					didJump = true;
+					goto L_flush;
+				}
+			L_postFlushJump:
+				didJump = false;
+				uint32_t a = mat->wroteAt;
+				uint8_t branch[8] = { G_DL, 0, 0, 0, a >> 24, a >> 16, a >> 8, a };
+				
+				fwrite(branch, 1, sizeof(branch), dl);
+			}
+			
+			/* retry in perpetuity until it fits */
+			for (int i = 0; i < 3; )
+			{
+				while (i < 3)
+				{
+					/* doesn't fit */
+					if ((t->vbidx[i] = vbufGetVertexIndex(vbuf, &vbufIndex, t->v[i])) < 0)
+					{
+					L_flush:do{}while(0);
+						uint32_t addr = 0x03000000 | ftell(fp);
+						
+						/* flush compiled vertex buffer to file */
+						for (i = 0; i < vbufIndexOld; ++i)
+						{
+							struct vertex *v = vbuf + i;
+							uint8_t result[16];
+							
+							memcpy(result, v, sizeof(*v));
+							BEw16(result + 0, v->x);
+							BEw16(result + 2, v->y);
+							BEw16(result + 4, v->z);
+							
+							fwrite(result, 1, sizeof(result), fp);
+						}
+						
+						/* flush vertex load command to display list */
+						{
+							uint8_t cmd[8] = {
+								G_VTX
+								, vbufIndexOld >> 4
+								, vbufIndexOld << 4
+								, ((0 + vbufIndexOld) & 0x7f) << 1
+								, addr >> 24, addr >> 16, addr >> 8, addr
+							};
+							
+							fwrite(cmd, 1, sizeof(cmd), dl);
+							vbufIndex = 0;
+						}
+						
+						/* flush triangles to display list */
+						{
+							for (struct triangle *w = tBegin; w != t && w; w = w->next)
+							{
+								struct triangle *n = w->next != t ? w->next : 0;
+								uint8_t cmd[8] = {
+									G_TRI
+									, w->vbidx[0] << 1
+									, w->vbidx[1] << 1
+									, w->vbidx[2] << 1
+								};
+								
+								if (n)
+									cmd[0] = G_TRI2
+									, cmd[5] = n->vbidx[0] << 1
+									, cmd[6] = n->vbidx[1] << 1
+									, cmd[7] = n->vbidx[2] << 1
+									, w = n
+								;
+								
+								fwrite(cmd, 1, sizeof(cmd), dl);
+							}
+							
+							tBegin = t;
+						}
+						
+						if (didJump)
+							goto L_postFlushJump;
+						
+						if (!t->next)
+							goto L_triangleDataDone;
+						
+						i = 0;
+					}
+					else
+						++i;
+				}
+			}
+			
+			/* flush any remaining triangles */
+			if (!t->next)
+				goto L_flush;
+			L_triangleDataDone:do{}while(0);
+		}
+		
+		g->wroteAt = 0x03000000 | ftell(fp);
+		Log(" > writing it at %08x", g->wroteAt);
+		
+		/* append dl's contents onto fp */
+		fwrite(enddl, 1, sizeof(enddl), dl);
+		dlLen = ftell(dl);
+		fseek(dl, 0, SEEK_SET);
+		while(dlLen--)
+			fputc(fgetc(dl), fp);
+		fclose(dl);
+	}
+	
+	/* write mesh header */
+	{
+		const int type = 0x00;
+		const int stride = (type == 0x00) ? 8 : 16;
+		uint32_t wroteAt = 0x03000000 | ftell(fp);
+		uint32_t start = wroteAt + 12;
+		uint32_t end = start + opaNum * stride;
+		uint8_t meshHeader[] = {
+			type // type
+			, opaNum // number of entries
+			, 0 // padding
+			, 0 // padding
+			, U32_BYTES(start)
+			, U32_BYTES(end)
+		};
+		
+		/* main header structure */
+		fwrite(meshHeader, 1, sizeof(meshHeader), fp);
+		
+		/* the mesh pointer array referenced by the header */
+		for (struct group *g = room->group; g; g = g->next)
+		{
+			if (type == 0x00)
+			{
+				uint8_t tmp[4] = { U32_BYTES(g->wroteAt) };
+				uint8_t zero[4] = { 0 };
+				
+				fwrite(tmp, 1, sizeof(tmp), fp); // opa
+				fwrite(zero, 1, sizeof(zero), fp); // xlu
+			}
+			else if (type == 0x02)
+			{
+				// TODO
+			}
+		}
+		
+		/* 16-byte alignment */
+		while (ftell(fp) & 0xf)
+			fputc(0, fp);
+		
+		/* update room header to point to mesh header */
+		{
+			uint8_t tmp[4] = { U32_BYTES(wroteAt) };
+			
+			fseek(fp, 0, SEEK_SET);
+			while (fgetc(fp) != 0x0A)
+				fseek(fp, 7, SEEK_CUR);
+			fseek(fp, 3, SEEK_CUR);
+			fwrite(tmp, 1, sizeof(tmp), fp);
 		}
 	}
 	

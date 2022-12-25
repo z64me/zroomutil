@@ -115,6 +115,17 @@ uint8_t BEr8(const void *p)
 	return b[0];
 }
 
+void BEw16(void *dst, uint16_t v)
+{
+	uint8_t *b = dst;
+	
+	if (!dst)
+		return;
+	
+	b[0] = v >> 8;
+	b[1] = v;
+}
+
 void *Memdup(const void *src, size_t len)
 {
 	void *dst = malloc(len);
