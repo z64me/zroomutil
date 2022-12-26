@@ -135,3 +135,31 @@ void *Memdup(const void *src, size_t len)
 	
 	return memcpy(dst, src, len);
 }
+
+char *Strdup(const char *str)
+{
+	if (!str || !*str)
+		return 0;
+	
+	return Memdup(str, strlen(str) + 1);
+}
+
+int min_int(const int a, const int b)
+{
+	return a < b ? a : b;
+}
+
+int min4_int(const int a, const int b, const int c, const int d)
+{
+	return min_int(min_int(a, b), min_int(c, d));
+}
+
+int max_int(const int a, const int b)
+{
+	return a > b ? a : b;
+}
+
+int max4_int(const int a, const int b, const int c, const int d)
+{
+	return max_int(max_int(a, b), max_int(c, d));
+}

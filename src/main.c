@@ -5,8 +5,10 @@
  *
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "common.h"
 #include "model.h"
@@ -20,6 +22,8 @@ static void showargs(void)
 	Log(ARG "--import file.zroom - imports a room file");
 	Log(ARG "                      (when used multiple times, rooms are concatenated)");
 	Log(ARG "--flatten - merges all groups into one");
+	Log(ARG "--divide '4' - divides a flattened room into 4x4x4 (can be any value)");
+	Log(ARG "               (can specify multiple subdivision levels e.g. '4,3,2')");
 	Log(ARG "--wavefront out.obj - exports the result to Wavefront model file");
 	Log(ARG "--zroom out.zroom - exports the result to zroom model file");
 	exit(EXIT_FAILURE);
@@ -52,13 +56,36 @@ int main(int argc, char *argv[])
 		}
 		else if (!strcmp(a, "--wavefront"))
 		{
-			room_writeWavefront(room, next);
+			room_writeWavefront(room, 0, next);
 			++i;
 		}
 		else if (!strcmp(a, "--zroom"))
 		{
 			room_writeZroom(room, next, true);
 			++i;
+		}
+		else if (!strcmp(a, "--divide"))
+		{
+			char *tmp = Strdup(next);
+			int div[256]; // surely no one will nest this many divisions...
+			int divNum = 0;
+			
+			for (const char *w = tmp
+				; w && *w && divNum < (int)(sizeof(div) / sizeof(*div))
+				; ++w
+			)
+			{
+				if (sscanf(w, "%d", &div[divNum]) != 1)
+					die("error parsing %s %s", a, next);
+				while (*w && isdigit(*w))
+					++w;
+				divNum += 1;
+				if (!*w)
+					break;
+			}
+			room_divide(room, div, divNum);
+			++i;
+			free(tmp);
 		}
 		else if (!strcmp(a, "--flatten"))
 		{

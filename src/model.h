@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 
+struct bbox;
 struct material;
 struct vertex;
 struct triangle;
@@ -17,10 +18,11 @@ struct group;
 struct room;
 
 void room_flatten(struct room *room);
+void room_divide(struct room *room, const int divisions[], const int divisionsNum);
 void room_merge(struct room *dst, struct room *src);
 struct room *room_load(const char *fn);
 void room_free(struct room *room);
-void room_writeWavefront(struct room *room, const char *outfn);
+void room_writeWavefront(struct room *room, struct group *group, const char *outfn);
 void room_writeZroom(struct room *room, const char *outfn, bool withMaterials);
 
 #endif /* MODEL_H_INCLUDED */

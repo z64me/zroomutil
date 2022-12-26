@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
 
 #include "common.h"
 #include "model.h"
@@ -28,6 +29,17 @@ static uint8_t *sgRoomSegment = 0;
 
 // private types
 #if 1
+#define BBOX_INIT_V (struct bbox){INT16_MAX, INT16_MAX, INT16_MAX, INT16_MIN, INT16_MIN, INT16_MIN}
+struct bbox
+{
+	int16_t xmin;
+	int16_t ymin;
+	int16_t zmin;
+	int16_t xmax;
+	int16_t ymax;
+	int16_t zmax;
+};
+
 struct material
 {
 	struct material *next;
@@ -55,8 +67,10 @@ struct triangle
 struct group
 {
 	struct group *next;
+	struct group *child;
 	struct material *mat;
 	struct triangle *tri;
+	struct bbox bbox;
 	uint32_t wroteAt;
 };
 
@@ -260,11 +274,242 @@ static void group_merge(struct group *dst, struct group *src)
 	if (!dst || !src)
 		return;
 	
+	if (src->child)
+	{
+		struct group *dst = src;
+		struct group *next = 0;
+		
+		for (struct group *src = dst->child; src; src = next)
+		{
+			next = src->next;
+			group_merge(dst, src);
+		}
+	}
+	
 	for (t = dst->tri; t && t->next; )
 		t = t->next;
 	
 	t->next = src->tri;
 	free(src);
+}
+
+static void group_bounds_recursive(const struct group *g, struct bbox *bbox)
+{
+	struct triangle *t;
+	
+	if (!g || !bbox)
+		return;
+	
+	for (t = g->tri; t; t = t->next)
+	{
+#define DO_BOUNDS(V, X, FUNC) \
+	bbox->V = FUNC( \
+		bbox->V \
+		, t->v[0].X \
+		, t->v[1].X \
+		, t->v[2].X \
+	)
+		DO_BOUNDS(xmin, x, min4_int);
+		DO_BOUNDS(ymin, y, min4_int);
+		DO_BOUNDS(zmin, z, min4_int);
+		
+		DO_BOUNDS(xmax, x, max4_int);
+		DO_BOUNDS(ymax, y, max4_int);
+		DO_BOUNDS(zmax, z, max4_int);
+#undef DO_BOUNDS
+	}
+	
+	if (g->child)
+		group_bounds_recursive(g->child, bbox);
+}
+
+static struct bbox group_bounds(const struct group *g)
+{
+	struct bbox result = BBOX_INIT_V;
+	
+	if (!g)
+		return result;
+	
+	group_bounds_recursive(g, &result);
+	
+	return result;
+}
+
+static bool triangle_inside_bbox(const struct triangle t, const struct bbox bb)
+{
+	/* use center point */
+	struct vertex v;
+	
+	v.x = (t.v[0].x + t.v[1].x + t.v[2].x) / 3;
+	v.y = (t.v[0].y + t.v[1].y + t.v[2].y) / 3;
+	v.z = (t.v[0].z + t.v[1].z + t.v[2].z) / 3;
+	
+	return v.x >= bb.xmin
+		&& v.x <= bb.xmax
+		&& v.y >= bb.ymin
+		&& v.y <= bb.ymax
+		&& v.z >= bb.zmin
+		&& v.z <= bb.zmax
+	;
+}
+
+static void group_divide(struct group *g, struct bbox *bbox, const int divisions[], const int divisionsNum)
+{
+	if (!divisionsNum)
+		return;
+	
+	int largest = max4_int(0, bbox->xmax - bbox->xmin, bbox->ymax - bbox->ymin, bbox->zmax - bbox->zmin);
+	int div = divisions[0];
+	int tmp = 0;
+	int sec;
+	
+	/* ensure that the largest is evenly divisible by the number of divisions */
+	while (largest % div)
+		++largest;
+	sec = largest / div;
+	
+	/* if bbox isn't a cube, make it a cube */
+	//int delta;
+	//if ((delta = (largest - (bbox->xmax - bbox->xmin))) != 0) // XXX old idea
+	//	bbox->xmax += delta / 2, bbox->xmin -= delta / 2;
+#define DO_ONE(VMIN, VMAX) \
+	while ((bbox->VMAX - bbox->VMIN) != largest) \
+		((++tmp)&1) ? (bbox->VMAX += 1) : (bbox->VMIN -= 1);
+	DO_ONE(xmin, xmax)
+	DO_ONE(ymin, ymax)
+	DO_ONE(zmin, zmax)
+#undef DO_ONE
+	
+	for (int x = 0; x < div; ++x)
+	{
+		for (int y = 0; y < div; ++y)
+		{
+			for (int z = 0; z < div; ++z)
+			{
+				//struct triangle *prev = g->tri;
+				struct triangle *next = 0;
+				struct group *child = calloc(1, sizeof(*child));
+				struct bbox bb = {
+					.xmin = bbox->xmin + sec * x,
+					.ymin = bbox->ymin + sec * y,
+					.zmin = bbox->zmin + sec * z
+				};
+				bb.xmax = bb.xmin + sec;
+				bb.ymax = bb.ymin + sec;
+				bb.zmax = bb.zmin + sec;
+				
+				/* setup */
+				child->bbox = bb;
+				for (struct triangle *t = g->tri; t; t = next)
+				{
+					next = t->next;
+					if (next)
+					{
+						if (triangle_inside_bbox(*next, bb))
+						{
+							void *nnext = next->next;
+							
+							next->next = child->tri;
+							child->tri = next;
+							
+							t->next = nnext;
+							next = t;
+						}
+					}
+					#if 0 /* XXX misc old experments */
+					else if (triangle_inside_bbox(*t, bb))
+					{
+						Log("match");
+					}
+					continue;
+					if (triangle_inside_bbox(*t, bb))
+					{
+						if (prev)
+						{
+							if (prev == g->tri)
+								g->tri = next;
+							else
+								prev->next = next;
+						}
+						t->next = child->tri;
+						child->tri = t;
+					}
+					else
+						prev = t;
+					#endif
+				}
+				
+				/* debug helper: add 3D bbox to output */
+				if (false)
+				{
+					struct triangle *t;
+					#define QVTX(X, Y, Z) (struct vertex){bb.X, bb.Y, bb.Z, {0}}
+					struct vertex v[] = {
+						QVTX(xmax, ymin, zmin),
+						QVTX(xmax, ymin, zmax),
+						QVTX(xmin, ymin, zmax),
+						QVTX(xmin, ymin, zmin),
+						QVTX(xmax, ymax, zmin),
+						QVTX(xmax, ymax, zmax),
+						QVTX(xmin, ymax, zmax),
+						QVTX(xmin, ymax, zmin)
+					};
+					#define PUSH_TRI(A, B, C) \
+						t = calloc(1, sizeof(*t)); \
+						t->next = child->tri; \
+						t->v[0] = v[A - 1]; \
+						t->v[1] = v[B - 1]; \
+						t->v[2] = v[C - 1]; \
+						child->tri = t;
+					PUSH_TRI(2, 4, 1)
+					PUSH_TRI(8, 6, 5)
+					PUSH_TRI(5, 2, 1)
+					PUSH_TRI(6, 3, 2)
+					PUSH_TRI(3, 8, 4)
+					PUSH_TRI(1, 8, 5)
+					PUSH_TRI(2, 3, 4)
+					PUSH_TRI(8, 7, 6)
+					PUSH_TRI(5, 6, 2)
+					PUSH_TRI(6, 7, 3)
+					PUSH_TRI(3, 7, 8)
+					PUSH_TRI(1, 4, 8)
+					#undef PUSH_TRI
+					#undef QVTX
+				}
+				
+				/* link in */
+				child->next = g->child;
+				g->child = child;
+				
+				/* subdivide */
+				if (divisionsNum > 1)
+					group_divide(child, &bb, divisions + 1, divisionsNum - 1);
+			}
+		}
+	}
+}
+
+static void group_free(struct group *g)
+{
+	struct triangle *tNext = 0;
+	struct group *gNext = 0;
+	
+	for ( ; g; g = gNext)
+	{
+		gNext = g->next;
+		
+		for (struct triangle *t = g->tri; t; t = tNext)
+		{
+			tNext = t->next;
+			
+			free(t);
+		}
+		
+		if (g->child)
+			group_free(g->child);
+		
+		free(g);
+	}
 }
 #endif // private helpers
 
@@ -286,6 +531,23 @@ void room_flatten(struct room *room)
 	}
 	
 	dst->next = 0;
+}
+
+/* divide a flattened room into nested group structure */
+void room_divide(struct room *room, const int divisions[], const int divisionsNum)
+{
+	struct bbox bbox;
+	
+	if (!room || !divisions || divisionsNum <= 0 || !room->group)
+		return;
+	
+	// TODO: do I want a fatal error here, or just a warning + invoke room_flatten?
+	if (room->group->next)
+		die("room_divide error: trying to divide a non-flattened room");
+	
+	bbox = group_bounds(room->group);
+	
+	group_divide(room->group, &bbox, divisions, divisionsNum);
 }
 
 /* merges src into dst (src will be destroyed) */
@@ -368,25 +630,11 @@ struct room *room_load(const char *fn)
 void room_free(struct room *room)
 {
 	struct material *mNext = 0;
-	struct triangle *tNext = 0;
-	struct group *gNext = 0;
 	
 	if (!room)
 		return;
 	
-	for (struct group *g = room->group; g; g = gNext)
-	{
-		gNext = g->next;
-		
-		for (struct triangle *t = g->tri; t; t = tNext)
-		{
-			tNext = t->next;
-			
-			free(t);
-		}
-		
-		free(g);
-	}
+	group_free(room->group);
 		
 	for (struct material *m = room->mat; m; m = mNext)
 	{
@@ -402,19 +650,27 @@ void room_free(struct room *room)
 }
 
 /* write a room to wavefront */
-void room_writeWavefront(struct room *room, const char *outfn)
+void room_writeWavefront(struct room *room, struct group *group, const char *outfn)
 {
-	FILE *fp;
-	int v = 1; /* wavefront vertex indexing starts at 1 */
+	static FILE *fp = 0; /* XXX statics to support recursion */
+	static int v = 1;
+	bool ownsFp = false;
 	
-	if (!room
-		|| !outfn
-		|| !(fp = fopen(outfn, "wb"))
-	)
-		return;
+	/* initial load */
+	if (fp == 0)
+	{
+		if (!room
+			|| !outfn
+			|| !(fp = fopen(outfn, "wb"))
+		)
+			return;
+		
+		v = 1; /* wavefront vertex indexing starts at 1 */
+		ownsFp = true;
+	}
 	
 	/* write every group */
-	for (struct group *g = room->group; g; g = g->next)
+	for (struct group *g = group ? group : room->group; g; g = g->next)
 	{
 		fprintf(fp, "g %p\n", (void*)g);
 		
@@ -427,9 +683,18 @@ void room_writeWavefront(struct room *room, const char *outfn)
 			fprintf(fp, "f %d %d %d\n", v, v + 1, v + 2);
 			v += 3;
 		}
+		
+		/* recursion */
+		if (g->child)
+			room_writeWavefront(0, g->child, 0);
 	}
 	
-	fclose(fp);
+	/* initial load */
+	if (ownsFp)
+	{
+		fclose(fp);
+		fp = 0;
+	}
 }
 
 /* write a room to zroom format */
